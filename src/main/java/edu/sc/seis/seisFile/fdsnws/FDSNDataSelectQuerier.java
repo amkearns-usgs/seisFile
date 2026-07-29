@@ -11,22 +11,23 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.util.List;
 
-import org.apache.http.HttpEntity;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.CredentialsProvider;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.client.protocol.HttpClientContext;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.BasicCredentialsProvider;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-
 import edu.sc.seis.seisFile.ChannelTimeWindow;
 import edu.sc.seis.seisFile.SeisFileException;
 import edu.sc.seis.seisFile.mseed.DataRecordIterator;
+import org.apache.hc.client5.http.auth.AuthScope;
+import org.apache.hc.client5.http.auth.UsernamePasswordCredentials;
+import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.auth.BasicCredentialsProvider;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.io.SocketConfig;
+import org.apache.hc.core5.http.io.entity.StringEntity;
 
 public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
 
@@ -112,23 +113,32 @@ public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
         logger.info("Post Query: " + connectionUri);
         logger.info(postQuery);
         RequestConfig requestConfig = RequestConfig.custom()
-                .setConnectTimeout(getConnectTimeout())
                 .setConnectionRequestTimeout(getConnectTimeout())
-                .setSocketTimeout(getReadTimeout())
                 .setRedirectsEnabled(true)
                 .build();
+        PoolingHttpClientConnectionManager manager = PoolingHttpClientConnectionManagerBuilder
+                .create()
+                .setDefaultSocketConfig(SocketConfig.custom()
+                        .setSoTimeout(getReadTimeout())
+                        .build()
+                )
+                .setDefaultConnectionConfig(ConnectionConfig.custom()
+                        .setConnectTimeout(getConnectTimeout())
+                        .build()
+                )
+                .build();
         HttpClientBuilder httpClientBuilder = HttpClientBuilder.create()
+                .setConnectionManager(manager)
                 .setDefaultRequestConfig(requestConfig);
         if (username != null && username.length()!= 0 && password != null && password.length() != 0) {
             logger.info("Adding user/pass cred to query");
-            UsernamePasswordCredentials creds = new UsernamePasswordCredentials(username, password);
-            CredentialsProvider credsProvider = new BasicCredentialsProvider();
-            credsProvider.setCredentials(new AuthScope(queryParams.getHost(), queryParams.getPort(), realm), creds);
+            UsernamePasswordCredentials creds = new UsernamePasswordCredentials(username, password.toCharArray());
+            BasicCredentialsProvider credsProvider = new BasicCredentialsProvider();
+            credsProvider.setCredentials(new AuthScope(queryParams.getHTTPHost(), realm, queryParams.getScheme()), creds);
             httpClientBuilder.setDefaultCredentialsProvider(credsProvider);
         }
-        CloseableHttpClient httpClient;
-        try {
-            httpClient = httpClientBuilder.build();
+
+        try (CloseableHttpClient httpClient = httpClientBuilder.build()) {
             TimeQueryLog.add(connectionUri);
             HttpPost request = new HttpPost(connectionUri);
             HttpClientContext context = HttpClientContext.create();
@@ -137,28 +147,51 @@ public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
             request.setHeader("Accept-Encoding", "gzip, deflate");
             HttpEntity entity = new StringEntity(postQuery);
             request.setEntity(entity);
-            response = httpClient.execute(request, context);
-            if (response.getStatusLine().getStatusCode() == 307 || response.getStatusLine().getStatusCode() == 308) {
-                URI redirectURI = new URI(response.getFirstHeader("location").getValue());
-                logger.info("Redirect POST "+response.getStatusLine().getStatusCode()+" to "+redirectURI);
+            performRecursiveRedirect(httpClient, request, context, entity);
+        } catch(IOException e) {
+            throw new FDSNWSException("Problem with connection", e, connectionUri);
+        } catch(RuntimeException e) {
+            throw new FDSNWSException("At-runtime problem with connection", e.getCause(), connectionUri);
+        }
+    }
+
+    private int performRecursiveRedirect(CloseableHttpClient httpClient, HttpPost request,
+                                          HttpClientContext context, HttpEntity entity) throws IOException, FDSNWSException {
+        int ignore = httpClient.execute(request, context, response -> {
+            if (response.getCode() == 307 || response.getCode() == 308) {
+                URI redirectURI;
+                try {
+                    redirectURI = new URI(response.getFirstHeader("location").getValue());
+                } catch (URISyntaxException e) {
+                    throw new RuntimeException(e);
+                }
+                logger.info("Redirect POST " + response.getCode() + " to " + redirectURI);
                 HttpPost redirectRequest = new HttpPost(redirectURI);
                 redirectRequest.setHeader("User-Agent", getUserAgent());
                 redirectRequest.setHeader("Accept", getAcceptHeader());
                 redirectRequest.setHeader("Accept-Encoding", "gzip, deflate");
                 redirectRequest.setEntity(entity);
-                response = httpClient.execute(redirectRequest, context);
+                try {
+                    return performRecursiveRedirect(httpClient, redirectRequest, context, entity);
+                } catch (FDSNWSException e) {
+                    throw new RuntimeException(e);
+                }
             }
-            processConnection(response);
-        } catch(IOException | RuntimeException e) {
-            throw new FDSNWSException("Problem with connection", e, connectionUri);
-        }
+            try {
+                processConnection(response);
+            } catch (FDSNWSException e) {
+                throw new RuntimeException(e);
+            }
+            return 0;
+        });
+        return 0;
     }
 
     String username;
 
     String password;
     
-    String realm = AuthScope.ANY_REALM;
+    String realm = null; // null means any realm
 
     List<ChannelTimeWindow> request;
 

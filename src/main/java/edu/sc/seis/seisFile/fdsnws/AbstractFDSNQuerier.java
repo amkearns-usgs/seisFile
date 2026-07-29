@@ -25,14 +25,17 @@ import javax.xml.validation.Schema;
 import javax.xml.validation.SchemaFactory;
 import javax.xml.validation.Validator;
 
-import org.apache.http.HttpEntity;
-import org.apache.http.HttpHost;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.core5.http.*;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.core5.http.io.SocketConfig;
+import org.apache.hc.core5.util.Timeout;
 import org.codehaus.stax2.XMLEventReader2;
 import org.codehaus.stax2.XMLInputFactory2;
 import org.codehaus.stax2.XMLStreamReader2;
@@ -53,33 +56,50 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
 
     public void connect() throws URISyntaxException, FDSNWSException {
         connectionUri = formURI();
-        CloseableHttpClient httpClient = null;
-        try {
-            RequestConfig.Builder requestConfigBuilder = RequestConfig.custom()
-                    .setConnectTimeout(getConnectTimeout())
-                    .setConnectionRequestTimeout(getConnectTimeout())
-                    .setSocketTimeout(getReadTimeout())
-                    .setRedirectsEnabled(true);
-            if (getProxyHost() != null) {
-              HttpHost proxy = new HttpHost(getProxyHost(), getProxyPort(), getProxyProtocol());
-              requestConfigBuilder.setProxy(proxy);
-            }
-            RequestConfig requestConfig = requestConfigBuilder.build();
-            httpClient = HttpClientBuilder.create().setDefaultRequestConfig(requestConfig).build();
+        RequestConfig.Builder requestConfigBuilder = RequestConfig.custom()
+                .setConnectionRequestTimeout(getConnectTimeout())
+                .setRedirectsEnabled(true);
+        if (getProxyHost() != null) {
+            HttpHost proxy = new HttpHost(getProxyProtocol(), getProxyHost(), getProxyPort());
+            requestConfigBuilder.setProxy(proxy);
+        }
+        PoolingHttpClientConnectionManager manager = PoolingHttpClientConnectionManagerBuilder
+                .create()
+                .setDefaultSocketConfig(SocketConfig.custom()
+                        .setSoTimeout(getReadTimeout())
+                        .build()
+                )
+                .setDefaultConnectionConfig(ConnectionConfig.custom()
+                        .setConnectTimeout(getConnectTimeout())
+                        .build()
+                )
+                .build();
+        HttpClientBuilder httpClientBuilder = HttpClientBuilder.create()
+                .setConnectionManager(manager)
+                .setDefaultRequestConfig(requestConfigBuilder.build());
+        try (CloseableHttpClient httpClient = httpClientBuilder.build()) {
             HttpGet request = new HttpGet(connectionUri);
             request.setHeader("User-Agent", getUserAgent());
             request.setHeader("Accept", getAcceptHeader());
             TimeQueryLog.add(connectionUri);
-            response = httpClient.execute(request);
 
-            processConnection(response);
-        } catch(IOException | RuntimeException e) {
+            httpClient.execute(request, response -> {
+                try {
+                    processConnection(response);
+                } catch (FDSNWSException e) {
+                    throw new RuntimeException(e);
+                }
+                return 0;
+            });
+        } catch(IOException e) {
             throw new FDSNWSException("Problem with connection", e, connectionUri);
+        } catch(RuntimeException e) {
+            throw new FDSNWSException("At-runtime problem with connection", e.getCause(), connectionUri);
         }
     }
 
-    protected void processConnection(CloseableHttpResponse response) throws IOException, FDSNWSException {
-        responseCode = response.getStatusLine().getStatusCode();
+    protected void processConnection(ClassicHttpResponse response) throws IOException, FDSNWSException {
+        responseCode = response.getCode();
         if (responseCode == 204) {
             empty = true;
             response.close();
@@ -205,7 +225,7 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         return reader;
     }
 
-    public static String extractErrorMessage(HttpResponse response) {
+    public static String extractErrorMessage(CloseableHttpResponse response) {
         String out = "";
         BufferedReader errReader = null;
         try {
@@ -241,6 +261,41 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         return out;
     }
 
+    public static String extractErrorMessage(ClassicHttpResponse response) {
+        String out = "";
+        BufferedReader errReader = null;
+        try {
+            HttpEntity entity = response.getEntity();
+            InputStream inError = entity.getContent();
+            if (inError == null) {
+                out = "<Empty Error Message From Server>";
+            } else {
+                if ("gzip".equals(entity.getContentEncoding())) {
+                    inError = new GZIPInputStream(inError);
+                }
+                int maxLines = 1000;
+                int lineNum = 0;
+                errReader = new BufferedReader(new InputStreamReader(inError));
+                for (String line; (line = errReader.readLine()) != null && lineNum < maxLines;) {
+                    out += line + "\n";
+                    lineNum++;
+                }
+                if (lineNum == maxLines) {
+                    out += "...output truncated at " + maxLines + " lines.";
+                }
+            }
+        } catch(IOException e) {
+            out += "\nException reading error stream: " + e.toString();
+        } finally {
+            if (errReader != null)
+                try {
+                    errReader.close();
+                } catch(IOException e) {
+                    // oh well
+                }
+        }
+        return out;
+    }
 
     public String getAcceptHeader() {
         return acceptHeader;
@@ -309,12 +364,12 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         readTimeout = milliseconds;
     }
 
-    public int getConnectTimeout() {
-        return connectTimeout;
+    public Timeout getConnectTimeout() {
+        return Timeout.ofMilliseconds(connectTimeout);
     }
 
-    public int getReadTimeout() {
-        return readTimeout;
+    public Timeout getReadTimeout() {
+        return Timeout.ofMilliseconds(readTimeout);
     }
 
     public static Throwable extractRootCause(Throwable t) {
@@ -362,7 +417,7 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         if (inputStream != null) {
             try {
                 inputStream.close();
-            } catch(org.apache.http.MalformedChunkCodingException ee) {
+            } catch(MalformedChunkCodingException ee) {
             	//not sure, but don't think we care about this...
             } catch(IOException e) {
                 logger.warn("can't close inputstream: "+connectionUri, e);
