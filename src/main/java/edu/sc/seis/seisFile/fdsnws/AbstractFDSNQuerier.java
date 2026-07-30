@@ -1,18 +1,14 @@
 package edu.sc.seis.seisFile.fdsnws;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.io.StringWriter;
+import java.io.*;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 
 import javax.xml.XMLConstants;
@@ -44,6 +40,8 @@ import org.codehaus.stax2.validation.XMLValidationSchemaFactory;
 import org.xml.sax.SAXException;
 
 import edu.sc.seis.seisFile.BuildVersion;
+
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 
 
 public abstract class AbstractFDSNQuerier implements AutoCloseable {
@@ -115,9 +113,11 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
             throw new FDSNWSException(errorMessage, connectionUri, responseCode);
         }
         HttpEntity entity = response.getEntity();
-        inputStream = new BufferedInputStream(entity.getContent(), 64*1024);
-        getReader();
-        inputStream.close();
+        Path tempFilePath = Files.createTempFile(UUID.randomUUID().toString(), ".xml");
+        Files.copy(entity.getContent(), tempFilePath, REPLACE_EXISTING);
+        File tempFile = tempFilePath.toFile();
+        tempFile.deleteOnExit();
+        inputStream = new FileInputStream(tempFile);
     }
 
     public static void validate(XMLStreamReader reader, URL schemaURL) throws SAXException, IOException {
