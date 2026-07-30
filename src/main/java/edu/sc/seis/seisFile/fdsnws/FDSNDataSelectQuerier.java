@@ -29,6 +29,8 @@ import org.apache.hc.core5.http.HttpEntity;
 import org.apache.hc.core5.http.io.SocketConfig;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 
+import javax.xml.stream.XMLStreamException;
+
 public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
 
     public FDSNDataSelectQuerier(FDSNDataSelectQueryParams queryParams) {
@@ -178,8 +180,9 @@ public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
                 }
             }
             try {
+                this.response = response;
                 processConnection(response);
-            } catch (FDSNWSException e) {
+            } catch (FDSNWSException | XMLStreamException | URISyntaxException e) {
                 throw new RuntimeException(e);
             }
             return 0;

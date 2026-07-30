@@ -84,9 +84,10 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
             TimeQueryLog.add(connectionUri);
 
             httpClient.execute(request, response -> {
+                this.response = response;
                 try {
                     processConnection(response);
-                } catch (FDSNWSException e) {
+                } catch (FDSNWSException | XMLStreamException | URISyntaxException e) {
                     throw new RuntimeException(e);
                 }
                 return 0;
@@ -94,11 +95,12 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         } catch(IOException e) {
             throw new FDSNWSException("Problem with connection", e, connectionUri);
         } catch(RuntimeException e) {
-            throw new FDSNWSException("At-runtime problem with connection", e.getCause(), connectionUri);
+            throw new FDSNWSException("At-runtime problem with connection", e, connectionUri);
         }
+
     }
 
-    protected void processConnection(ClassicHttpResponse response) throws IOException, FDSNWSException {
+    protected void processConnection(ClassicHttpResponse response) throws IOException, FDSNWSException, XMLStreamException, URISyntaxException {
         responseCode = response.getCode();
         if (responseCode == 204) {
             empty = true;
@@ -114,6 +116,8 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         }
         HttpEntity entity = response.getEntity();
         inputStream = new BufferedInputStream(entity.getContent(), 64*1024);
+        getReader();
+        inputStream.close();
     }
 
     public static void validate(XMLStreamReader reader, URL schemaURL) throws SAXException, IOException {
@@ -462,7 +466,7 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
 
     InputStream inputStream;
 
-    CloseableHttpResponse response;
+    ClassicHttpResponse response;
 
     protected String proxyHost = null;
 
