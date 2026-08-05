@@ -117,6 +117,7 @@ public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
         RequestConfig requestConfig = RequestConfig.custom()
                 .setConnectionRequestTimeout(getConnectTimeout())
                 .setRedirectsEnabled(true)
+                .setCircularRedirectsAllowed(false)
                 .build();
         PoolingHttpClientConnectionManager manager = PoolingHttpClientConnectionManagerBuilder
                 .create()
@@ -149,45 +150,22 @@ public class FDSNDataSelectQuerier extends AbstractFDSNQuerier {
             request.setHeader("Accept-Encoding", "gzip, deflate");
             HttpEntity entity = new StringEntity(postQuery);
             request.setEntity(entity);
-            performRecursiveRedirect(httpClient, request, context, entity);
+            // as we have setRedirectsEnabled set for the request config and
+            // setCircularRedirectsAllowed unset, we should need no special handling
+            // of request redirects -- the library should do that automatically.
+            this.response = httpClient.execute(request, context, response -> {
+                try {
+                    processConnection(response);
+                } catch (FDSNWSException | XMLStreamException | URISyntaxException e) {
+                    throw new RuntimeException(e);
+                }
+                return response;
+            });
         } catch(IOException e) {
             throw new FDSNWSException("Problem with connection", e, connectionUri);
         } catch(RuntimeException e) {
             throw new FDSNWSException("At-runtime problem with connection", e.getCause(), connectionUri);
         }
-    }
-
-    private int performRecursiveRedirect(CloseableHttpClient httpClient, HttpPost request,
-                                          HttpClientContext context, HttpEntity entity) throws IOException, FDSNWSException {
-        int ignore = httpClient.execute(request, context, response -> {
-            if (response.getCode() == 307 || response.getCode() == 308) {
-                URI redirectURI;
-                try {
-                    redirectURI = new URI(response.getFirstHeader("location").getValue());
-                } catch (URISyntaxException e) {
-                    throw new RuntimeException(e);
-                }
-                logger.info("Redirect POST " + response.getCode() + " to " + redirectURI);
-                HttpPost redirectRequest = new HttpPost(redirectURI);
-                redirectRequest.setHeader("User-Agent", getUserAgent());
-                redirectRequest.setHeader("Accept", getAcceptHeader());
-                redirectRequest.setHeader("Accept-Encoding", "gzip, deflate");
-                redirectRequest.setEntity(entity);
-                try {
-                    return performRecursiveRedirect(httpClient, redirectRequest, context, entity);
-                } catch (FDSNWSException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-            try {
-                this.response = response;
-                processConnection(response);
-            } catch (FDSNWSException | XMLStreamException | URISyntaxException e) {
-                throw new RuntimeException(e);
-            }
-            return 0;
-        });
-        return 0;
     }
 
     String username;
