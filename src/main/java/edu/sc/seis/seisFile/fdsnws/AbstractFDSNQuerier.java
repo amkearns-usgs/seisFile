@@ -229,42 +229,6 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
         return reader;
     }
 
-    public static String extractErrorMessage(CloseableHttpResponse response) {
-        String out = "";
-        BufferedReader errReader = null;
-        try {
-            HttpEntity entity = response.getEntity();
-            InputStream inError = entity.getContent();
-            if (inError == null) {
-                out = "<Empty Error Message From Server>";
-            } else {
-                if ("gzip".equals(entity.getContentEncoding())) {
-                    inError = new GZIPInputStream(inError);
-                }
-                int maxLines = 1000;
-                int lineNum = 0;
-                errReader = new BufferedReader(new InputStreamReader(inError));
-                for (String line; (line = errReader.readLine()) != null && lineNum < maxLines;) {
-                    out += line + "\n";
-                    lineNum++;
-                }
-                if (lineNum == maxLines) {
-                    out += "...output truncated at " + maxLines + " lines.";
-                }
-            }
-        } catch(IOException e) {
-            out += "\nException reading error stream: " + e.toString();
-        } finally {
-            if (errReader != null)
-                try {
-                    errReader.close();
-                } catch(IOException e) {
-                    // oh well
-                }
-        }
-        return out;
-    }
-
     public static String extractErrorMessage(ClassicHttpResponse response) {
         String out = "";
         BufferedReader errReader = null;
