@@ -22,7 +22,6 @@ import javax.xml.validation.SchemaFactory;
 import javax.xml.validation.Validator;
 
 import org.apache.hc.client5.http.config.ConnectionConfig;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.core5.http.*;
@@ -45,6 +44,8 @@ import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 
 
 public abstract class AbstractFDSNQuerier implements AutoCloseable {
+
+    private static final long MAX_MEM_BUFFER = 64*1024;
 
     public AbstractFDSNQuerier() {}
 
@@ -113,11 +114,18 @@ public abstract class AbstractFDSNQuerier implements AutoCloseable {
             throw new FDSNWSException(errorMessage, connectionUri, responseCode);
         }
         HttpEntity entity = response.getEntity();
-        Path tempFilePath = Files.createTempFile(UUID.randomUUID().toString(), ".xml");
-        Files.copy(entity.getContent(), tempFilePath, REPLACE_EXISTING);
-        File tempFile = tempFilePath.toFile();
-        tempFile.deleteOnExit();
-        inputStream = new FileInputStream(tempFile);
+        long length = entity.getContentLength();
+        if (length > 0 && length <= MAX_MEM_BUFFER) {
+            ByteArrayOutputStream byteStream = new ByteArrayOutputStream((int) MAX_MEM_BUFFER);
+            entity.writeTo(byteStream);
+            inputStream = new ByteArrayInputStream(byteStream.toByteArray());
+        } else {
+            Path tempFilePath = Files.createTempFile(UUID.randomUUID().toString(), ".xml");
+            Files.copy(entity.getContent(), tempFilePath, REPLACE_EXISTING);
+            File tempFile = tempFilePath.toFile();
+            tempFile.deleteOnExit();
+            inputStream = new FileInputStream(tempFile);
+        }
     }
 
     public static void validate(XMLStreamReader reader, URL schemaURL) throws SAXException, IOException {
